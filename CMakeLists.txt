@@ -48,8 +48,28 @@ set(libuvc_VERSION_MINOR 0)
 set(libuvc_VERSION_PATCH 5)
 set(libuvc_VERSION ${libuvc_VERSION_MAJOR}.${libuvc_VERSION_MINOR}.${libuvc_VERSION_PATCH})
 
-find_package(PkgConfig)
-pkg_check_modules(LIBUSB libusb-1.0)
+#find_package(PkgConfig)
+#pkg_check_modules(LIBUSB libusb-1.0)
+#${LIBUSB_HOME}/libusb/.libs/libusb-1.0.so
+set( CMAKE_FIND_ROOT_PATH_MODE_LIBRARY NEVER )
+set( LIBUSB_HOME $ENV{HOME}/build/libusb)
+find_library (LIBUSB_LIBRARIES
+			NAMES usb-1.0
+			PATHS ${LIBUSB_HOME}/libusb/.libs/
+			PATH_SUFFIXES lib
+			NO_DEFAULT_PATH)
+#message("LIBUSB=${LIBUSB}")
+message("LIBUSB_LIBRARIES=${LIBUSB_LIBRARIES}")
+
+find_path(LIBUSB_INCLUDE_DIRS libusb.h
+			HINTS ${LIBUSB_HOME}/libusb )
+
+set( CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH )
+
+message("LIBUSB_INCLUDE_DIRS=${LIBUSB_INCLUDE_DIRS}" )
+if(LIBUSB_INCLUDE_DIRS)
+	include_directories("${LIBUSB_INCLUDE_DIRS}")
+endif()
 
 # Try to find JPEG using a module or pkg-config. If that doesn't work, search for the header.
 find_package(jpeg QUIET)

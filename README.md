@@ -1,3 +1,8 @@
+local build libusb by reading COMPILE doc of libusb
+vim ../libusb/COMPILE
+the target libusb is:
+${LIBUSB_HOME}/libusb/.libs/libusb-1.0.so
+
 `libuvc` is a cross-platform library for USB video devices, built atop `libusb`.
 It enables fine-grained control over USB video devices exporting the standard USB Video Class
 (UVC) interface, enabling developers to write drivers for previously unsupported devices,
