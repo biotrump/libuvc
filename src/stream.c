@@ -560,7 +560,11 @@ void _uvc_process_payload(uvc_stream_handle_t *strmh, uint8_t *payload, size_t p
     memcpy(strmh->outbuf + strmh->got_bytes, payload + header_len, data_len);
     strmh->got_bytes += data_len;
 
-    if (header_info & (1 << 1)) {
+	/////////////////////////////////////
+	//Thomas ???? 	strmh->got_bytes < LIBUVC_XFER_BUF_SIZE
+	//printf("strmh->got_bytes=%d\n", strmh->got_bytes);
+
+	if (header_info & (1 << 1)) {
       /* The EOF bit is set, so publish the complete frame */
       _uvc_swap_buffers(strmh);
     }
@@ -1062,7 +1066,8 @@ void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
 
   frame->sequence = strmh->hold_seq;
   /** @todo set the frame time */
-  // frame->capture_time
+  	clock_gettime(CLOCK_REALTIME, &frame->capture_time);//????
+	//?????struc timeval
 
   /* copy the image data from the hold buffer to the frame (unnecessary extra buf?) */
   if (frame->data_bytes < strmh->hold_bytes) {

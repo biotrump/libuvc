@@ -31,14 +31,25 @@
 *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 *  POSSIBILITY OF SUCH DAMAGE.
 *********************************************************************/
+#define _BSD_SOURCE	//implicit declaration of function usleep
+#define _GNU_SOURCE             /* See feature_test_macros(7) */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <sys/time.h>
+#include <getopt.h>             /* getopt_long() */
+#include <fcntl.h>              /* low-level i/o */
+#include <unistd.h>
+
+#ifdef USE_OPENCV
 #include <opencv/highgui.h>
+#endif
 
 #include "libuvc/libuvc.h"
 
 struct timespec ts0;
+IplImage* cvImg;
 
 struct timespec diff(struct timespec start, struct timespec end)
 {
@@ -52,17 +63,76 @@ struct timespec diff(struct timespec start, struct timespec end)
 	}
 	return temp;
 }
-void cb(uvc_frame_t *frame, void *ptr) {
+
+struct timeval diff_tval(struct timeval start, struct timeval end)
+{
+	struct timeval temp;
+	if ((end.tv_usec-start.tv_usec)<0) {
+		temp.tv_sec = end.tv_sec-start.tv_sec-1;
+		temp.tv_usec = 1000000+end.tv_usec-start.tv_usec;
+	} else {
+		temp.tv_sec = end.tv_sec-start.tv_sec;
+		temp.tv_usec = end.tv_usec-start.tv_usec;
+	}
+	return temp;
+}
+
+#if 0
+struct timeval {
+	time_t		tv_sec;		/* seconds */
+	suseconds_t	tv_usec;		/* microseconds */
+};
+
+ * enum uvc_frame_format frame_format;
+  /** Number of bytes per horizontal line (undefined for compressed format) */
+  size_t step;
+  /** Frame number (may skip, but is strictly monotonically increasing) */
+  uint32_t sequence;
+  /** Estimate of system time when the device started capturing the image */
+  struct timeval capture_time;
+  
+res = uvc_start_streaming(devh, &ctrl, cb, 12345, 0);
+cb usr_ptr is from 12345 of uvc_start_streaming 
+
+#endif
+
+/**
+ * 
+ * 
+ */
+
+void cb(uvc_frame_t *frame, void *usr_ptr) {
   uvc_frame_t *bgr;
   uvc_error_t ret;
-  IplImage* cvImg;
 
+  	printf("%s:sequence=%d, tv_sec=%d, tv_nsec=%lu\n",__func__, 
+		   frame->sequence, frame->capture_time.tv_sec, 
+		  frame->capture_time.tv_nsec);
+
+	static struct timespec tv0;
+	struct timespec dt;
+	float fps;
+	if(tv0.tv_sec==0 && tv0.tv_nsec == 0){//init
+		tv0 =frame->capture_time;
+		memset(&dt,0,sizeof(dt));
+		fps=0.0f;
+	}else{
+		dt = diff(tv0, frame->capture_time);
+		fps = 1000000000l /(dt.tv_sec * 1000000000l + dt.tv_nsec);
+		tv0=frame->capture_time;
+	}
+	printf("%s:tv_sec=%d, tv_nsec=%lu, fps=%.1f\n",__func__, 
+		   dt.tv_sec , dt.tv_nsec, fps);
+	
+#if 0	
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
 	struct timespec delt = diff(ts0, ts);
 	ts0 = ts;
 	printf("%s:tv_sec=%d, tv_nsec=%d, fps=%.1f\n",__func__, 
-		   delt.tv_sec , delt.tv_nsec, 1000000000.0f/delt.tv_nsec);
+		   delt.tv_sec , delt.tv_nsec, 1.0E9/delt.tv_nsec);
+
+#endif
   //printf("callback! length = %u, ptr = %d\n", frame->data_bytes, (int) ptr);
 
   bgr = uvc_allocate_frame(frame->width * frame->height * 3);
@@ -78,19 +148,12 @@ void cb(uvc_frame_t *frame, void *ptr) {
     return;
   }
 
-  cvImg = cvCreateImageHeader(
-      cvSize(bgr->width, bgr->height),
-      IPL_DEPTH_8U,
-      3);
-
-  cvSetData(cvImg, bgr->data, bgr->width * 3); 
-
-  cvNamedWindow("Test", CV_WINDOW_AUTOSIZE);
+#ifdef USE_OPENCV
+  cvSetData(cvImg, bgr->data, bgr->width * 3);
   cvShowImage("Test", cvImg);
-  cvWaitKey(10);
-
-  cvReleaseImageHeader(&cvImg);
-
+  cvWaitKey(5);
+#endif	//USE_OPENCV
+  
   uvc_free_frame(bgr);
 }
 
@@ -129,7 +192,7 @@ int main(int argc, char **argv) {
       uvc_print_diag(devh, stderr);
 
       res = uvc_get_stream_ctrl_format_size(
-          devh, &ctrl, UVC_FRAME_FORMAT_YUYV, 640, 480, 30
+          devh, &ctrl, UVC_FRAME_FORMAT_YUYV, 640, 480, 30/*fps*/
       );
 
       uvc_print_stream_ctrl(&ctrl, stderr);
@@ -138,9 +201,19 @@ int main(int argc, char **argv) {
         uvc_perror(res, "get_mode");
       } else {
 
+	#ifdef USE_OPENCV
+	    cvNamedWindow("Test", CV_WINDOW_AUTOSIZE);
+		cvImg = cvCreateImageHeader(
+			cvSize(640 /*bgr->width*/, /*bgr->height*/ 480),
+			IPL_DEPTH_8U,
+			3);
+	#endif
 		clock_gettime(CLOCK_REALTIME, &ts0);
 
 		  res = uvc_start_streaming(devh, &ctrl, cb, 12345, 0);
+		//printf("%s:width=%d, height=%d\n",__func__,
+		//	   devh->streams->frame.width, devh->streams->frame.height);
+		  
 
         if (res < 0) {
           uvc_perror(res, "start_streaming");
@@ -173,6 +246,10 @@ int main(int argc, char **argv) {
   uvc_exit(ctx);
   puts("UVC exited");
 
-  return 0;
+#ifdef USE_OPENCV
+    cvReleaseImageHeader(&cvImg);
+#endif
+
+	return 0;
 }
 
