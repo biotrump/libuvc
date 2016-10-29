@@ -12,6 +12,7 @@ message("libuvc_BINARY_DIR : ${libuvc_BINARY_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${libuvc_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${libuvc_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${libuvc_BINARY_DIR}/lib)
+message("CMAKE_LIBRARY_OUTPUT_DIRECTORY=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 # -----------------------------------------------------------
 
 if (NOT CMAKE_BUILD_TYPE)
@@ -84,6 +85,17 @@ else()
   message(WARNING "JPEG not found. libuvc will not support JPEG decoding.")
 endif()
 
+
+#searching openMP in toolchain path, instead of host path!
+if(0)
+find_package(OpenMP)
+if(OPENMP_FOUND)
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+	add_definitions(-DENABLE_OPENMP)
+endif()
+endif()
+
 #if(${CMAKE_BUILD_TARGET} MATCHES "Shared")
   add_library(uvc SHARED ${SOURCES})
 #elseif(${CMAKE_BUILD_TARGET} MATCHES "Static")
@@ -136,25 +148,5 @@ install(FILES
 install(EXPORT libuvcTargets
   DESTINATION "${INSTALL_CMAKE_DIR}")
 
-#--------------------
-if (0)
-find_library (LIBUVCx
-			NAMES uvc_static
-			PATHS ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
-			PATH_SUFFIXES lib
-			NO_DEFAULT_PATH)
-message("LIBUVCx=${LIBUVCx}")
-endif()
 #-------------------
-if(1)
-add_executable(example
-	src/example.c
-)
-qt5_use_modules(example Widgets  OpenGL Test Concurrent)
-target_link_libraries(example
-	${LIBUSB_LIBRARIES}
-	${JPEG_LIBRARIES}
-	${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libuvc.so
-#	${uvc}
-)
-endif()
+add_subdirectory(test)
