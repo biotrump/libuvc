@@ -1,6 +1,19 @@
 cmake_minimum_required(VERSION 2.8)
 project(libuvc)
 
+message("CMAKE_SOURCE_DIR : ${CMAKE_SOURCE_DIR}")
+message("PROJECT_NAME : ${PROJECT_NAME}")
+message("libuvc_SOURCE_DIR : ${libuvc_SOURCE_DIR}")
+message("libuvc_BINARY_DIR : ${libuvc_BINARY_DIR}")
+
+# --------------------------------------------------
+# Organize output files.  On Windows this also keeps .dll files next
+# to the .exe files that need them, making tests easy to run.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${libuvc_BINARY_DIR}/bin)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${libuvc_BINARY_DIR}/lib)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${libuvc_BINARY_DIR}/lib)
+# -----------------------------------------------------------
+
 if (NOT CMAKE_BUILD_TYPE)
   message(STATUS "No build type selected, default to Release")
   set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
@@ -10,6 +23,24 @@ if (NOT CMAKE_BUILD_TARGET)
   message(STATUS "No target type selected, default to shared library")
   set(CMAKE_BUILD_TARGET "Shared" CACHE STRING "" FORCE)
 endif()
+
+#--------------------------------------------------
+#QT5
+# Widgets finds its own dependencies (QtGui and QtCore).
+find_package(Qt5Widgets)
+#  find_package(Qt5Declarative)
+
+# The Qt5Widgets_INCLUDES also includes the include directories for
+# dependencies QtCore and QtGui
+include_directories(${Qt5Widgets_INCLUDES})
+
+# We need add -DQT_WIDGETS_LIB when using QtWidgets in Qt 5.
+add_definitions(${Qt5Widgets_DEFINITIONS})
+
+# Executables fail to build with Qt 5 in the default configuration
+# without -fPIE. We add that here.
+#  set(CMAKE_CXX_FLAGS "${Qt5Widgets_EXECUTABLE_COMPILE_FLAGS}")
+#-----------------------------------------------
 
 set(libuvc_VERSION_MAJOR 0)
 set(libuvc_VERSION_MINOR 0)
@@ -53,13 +84,13 @@ else()
   message(WARNING "JPEG not found. libuvc will not support JPEG decoding.")
 endif()
 
-if(${CMAKE_BUILD_TARGET} MATCHES "Shared")
+#if(${CMAKE_BUILD_TARGET} MATCHES "Shared")
   add_library(uvc SHARED ${SOURCES})
-elseif(${CMAKE_BUILD_TARGET} MATCHES "Static")
-  add_library(uvc STATIC ${SOURCES})
-else()
-  message( FATAL_ERROR "Invalid build type ${CMAKE_BUILD_TARGET}" )
-endif()
+#elseif(${CMAKE_BUILD_TARGET} MATCHES "Static")
+  add_library(uvc_static STATIC ${SOURCES})
+#else()
+#  message( FATAL_ERROR "Invalid build type ${CMAKE_BUILD_TARGET}" )
+#endif()
 
 configure_file(include/libuvc/libuvc_config.h.in
   ${PROJECT_BINARY_DIR}/include/libuvc/libuvc_config.h @ONLY)
@@ -72,6 +103,8 @@ if(JPEG_FOUND)
 endif(JPEG_FOUND)
 
 target_link_libraries(uvc ${LIBUSB_LIBRARIES})
+
+message("uvc=${uvc}")
 
 #add_executable(test src/test.c)
 #target_link_libraries(test uvc ${LIBUSB_LIBRARIES} opencv_highgui
@@ -102,3 +135,26 @@ install(FILES
 
 install(EXPORT libuvcTargets
   DESTINATION "${INSTALL_CMAKE_DIR}")
+
+#--------------------
+if (0)
+find_library (LIBUVCx
+			NAMES uvc_static
+			PATHS ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+			PATH_SUFFIXES lib
+			NO_DEFAULT_PATH)
+message("LIBUVCx=${LIBUVCx}")
+endif()
+#-------------------
+if(1)
+add_executable(example
+	src/example.c
+)
+qt5_use_modules(example Widgets  OpenGL Test Concurrent)
+target_link_libraries(example
+	${LIBUSB_LIBRARIES}
+	${JPEG_LIBRARIES}
+	${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libuvc.so
+#	${uvc}
+)
+endif()
