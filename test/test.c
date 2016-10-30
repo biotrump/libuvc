@@ -33,218 +33,457 @@
 *********************************************************************/
 #define _BSD_SOURCE	//implicit declaration of function usleep
 #define _GNU_SOURCE             /* See feature_test_macros(7) */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <sys/time.h>
 #include <getopt.h>             /* getopt_long() */
 #include <fcntl.h>              /* low-level i/o */
+#include <stdint.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <errno.h>
+#include <linux/videodev2.h>
+#include <sys/time.h>
 
 #ifdef USE_OPENCV
 #include <opencv/highgui.h>
+IplImage* cvImg;
 #endif
 
 #include "libuvc/libuvc.h"
+#include "uvc_thd.h"
 
-struct timespec ts0;
-IplImage* cvImg;
+int frame_count;
+int fixedInterval=0;
+char format[20];
+float fps=30.0f;
+int InfraRed=0;
+int repeat=1;
+int pid=0;
+int vid=0;
+int verbose=0;
+char output[256];
+int frame_width=640;
+int frame_height=480;
+int frame_size;
+int uvc_pix_fmt=UVC_FRAME_FORMAT_YUYV;//UVC_FRAME_FORMAT_GRAY8, UVC_FRAME_FORMAT_RGB,UVC_FRAME_FORMAT_UYVY
+int v4l2_pix_fmt=V4L2_PIX_FMT_YUYV;//V4L2_PIX_FMT_GREY, 
+int quit=0;
+char sn[255];
+UVC_INFO_T myUVC;
 
-struct timespec diff(struct timespec start, struct timespec end)
-{
-	struct timespec temp;
-	if ((end.tv_nsec-start.tv_nsec)<0) {
-		temp.tv_sec = end.tv_sec-start.tv_sec-1;
-		temp.tv_nsec = 1000000000+end.tv_nsec-start.tv_nsec;
-	} else {
-		temp.tv_sec = end.tv_sec-start.tv_sec;
-		temp.tv_nsec = end.tv_nsec-start.tv_nsec;
-	}
-	return temp;
-}
+static const char short_options[] = "c:D:Ef:F:hIk:o:p:u:v:V";
 
-struct timeval diff_tval(struct timeval start, struct timeval end)
-{
-	struct timeval temp;
-	if ((end.tv_usec-start.tv_usec)<0) {
-		temp.tv_sec = end.tv_sec-start.tv_sec-1;
-		temp.tv_usec = 1000000+end.tv_usec-start.tv_usec;
-	} else {
-		temp.tv_sec = end.tv_sec-start.tv_sec;
-		temp.tv_usec = end.tv_usec-start.tv_usec;
-	}
-	return temp;
-}
-
-#if 0
-struct timeval {
-	time_t		tv_sec;		/* seconds */
-	suseconds_t	tv_usec;		/* microseconds */
+static const struct option
+long_options[] = {
+	{ "count",  required_argument, NULL, 'c' },
+	{ "windim", required_argument, NULL, 'D' },
+	{ "fixedInterval", no_argument, NULL, 'E' },
+	{ "format", required_argument,  NULL, 'f' },
+	{ "fps",  		required_argument, NULL, 'F' },
+	{ "help",   no_argument,       NULL, 'h' },
+	{ "InfraRed",no_argument, NULL, 'I' },
+	{ "repeat", required_argument, NULL, 'k' },
+	{ "output", required_argument, NULL, 'o' },
+	{ "pid", required_argument, NULL, 'p' },
+	{ "uvcformat", required_argument,  NULL, 'u' },
+	{ "vid", required_argument, NULL, 'v' },
+	{ "verbose", 	no_argument,       NULL, 'V' },
+	{ 0, 0, 0, 0 }
 };
 
- * enum uvc_frame_format frame_format;
-  /** Number of bytes per horizontal line (undefined for compressed format) */
-  size_t step;
-  /** Frame number (may skip, but is strictly monotonically increasing) */
-  uint32_t sequence;
-  /** Estimate of system time when the device started capturing the image */
-  struct timeval capture_time;
-  
-res = uvc_start_streaming(devh, &ctrl, cb, 12345, 0);
-cb usr_ptr is from 12345 of uvc_start_streaming 
-
-#endif
-
-/**
- * 
- * 
- */
-
-void cb(uvc_frame_t *frame, void *usr_ptr) {
-  uvc_frame_t *bgr;
-  uvc_error_t ret;
-
-  	printf("%s:sequence=%d, tv_sec=%d, tv_nsec=%lu\n",__func__, 
-		   frame->sequence, frame->capture_time.tv_sec, 
-		  frame->capture_time.tv_nsec);
-
-	static struct timespec tv0;
-	struct timespec dt;
-	float fps;
-	if(tv0.tv_sec==0 && tv0.tv_nsec == 0){//init
-		tv0 =frame->capture_time;
-		memset(&dt,0,sizeof(dt));
-		fps=0.0f;
-	}else{
-		dt = diff(tv0, frame->capture_time);
-		fps = 1000000000l /(dt.tv_sec * 1000000000l + dt.tv_nsec);
-		tv0=frame->capture_time;
-	}
-	printf("%s:tv_sec=%d, tv_nsec=%lu, fps=%.1f\n",__func__, 
-		   dt.tv_sec , dt.tv_nsec, fps);
-	
-#if 0	
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-	struct timespec delt = diff(ts0, ts);
-	ts0 = ts;
-	printf("%s:tv_sec=%d, tv_nsec=%d, fps=%.1f\n",__func__, 
-		   delt.tv_sec , delt.tv_nsec, 1.0E9/delt.tv_nsec);
-
-#endif
-  //printf("callback! length = %u, ptr = %d\n", frame->data_bytes, (int) ptr);
-
-  bgr = uvc_allocate_frame(frame->width * frame->height * 3);
-  if (!bgr) {
-    printf("unable to allocate bgr frame!");
-    return;
-  }
-
-  ret = uvc_any2bgr(frame, bgr);
-  if (ret) {
-    uvc_perror(ret, "uvc_any2bgr");
-    uvc_free_frame(bgr);
-    return;
-  }
-
-#ifdef USE_OPENCV
-  cvSetData(cvImg, bgr->data, bgr->width * 3);
-  cvShowImage("Test", cvImg);
-  cvWaitKey(5);
-#endif	//USE_OPENCV
-  
-  uvc_free_frame(bgr);
+void errno_exit(const char *s)
+{
+	printf("+%s:%s error %d, %s\n", __func__, s, errno, strerror(errno));
+	exit(EXIT_FAILURE);
 }
 
-int main(int argc, char **argv) {
-  uvc_context_t *ctx;
-  uvc_error_t res;
-  uvc_device_t *dev;
-  uvc_device_handle_t *devh;
-  uvc_stream_ctrl_t ctrl;
+static int option(int argc, char **argv)
+{
+	int r=0;
+	printf("+%s:\n",__func__);
 
-  res = uvc_init(&ctx, NULL);
+	for (;;) {
+		int idx;
+		int c;
 
-  if (res < 0) {
-    uvc_perror(res, "uvc_init");
-    return res;
-  }
+		c = getopt_long(argc, argv,
+				short_options, long_options, &idx);
 
-  puts("UVC initialized");
+		if (-1 == c)
+			break;
 
-  res = uvc_find_device(
-      ctx, &dev,
-      0, 0, NULL);
+		switch (c) {
+		case 0: /* getopt_long() flag */
+			break;
 
-  if (res < 0) {
-    uvc_perror(res, "uvc_find_device");
-  } else {
-    puts("Device found");
+		case 'F':
+			errno = 0;
+			fps = strtof(optarg, NULL);
+			printf("%s:fps=%.1f\n",__func__, fps);
+			if (errno)
+				errno_exit(optarg);
+			break;
+		case 'f':
+			if(optarg && strlen(optarg)){
+				printf("pixel fmt:%s\n",optarg);
+				if(strncmp(optarg,"YUYV", strlen("YUYV"))==0 )
+					v4l2_pix_fmt=V4L2_PIX_FMT_YUYV;
+				else if(strncmp(optarg,"NV21",strlen("NV21"))==0 )
+					v4l2_pix_fmt=V4L2_PIX_FMT_NV21;
+				else if(strncmp(optarg,"GREY",strlen("GREY"))==0 )
+					v4l2_pix_fmt=V4L2_PIX_FMT_GREY;
+				else if(strncmp(optarg,"Y10",strlen("Y10"))==0 )
+					v4l2_pix_fmt=V4L2_PIX_FMT_Y10;
+				else if(strncmp(optarg,"Y12",strlen("Y12"))==0 )
+					v4l2_pix_fmt=V4L2_PIX_FMT_Y12;
+				else if(strncmp(optarg,"Y16",strlen("Y16"))==0 )
+					v4l2_pix_fmt=V4L2_PIX_FMT_Y16;
+			}
+			printf("v4l2_pix_fmt=0x%x\n", v4l2_pix_fmt);
+			break;
 
-    res = uvc_open(dev, &devh);
+		case 'u':
+			if(optarg && strlen(optarg)){
+				printf("uvc fmt:%s\n",optarg);
+				if(strncmp(optarg,"YUYV", strlen("YUYV"))==0 )
+					uvc_pix_fmt=UVC_FRAME_FORMAT_YUYV;
+				else if(strncmp(optarg,"UYVY", strlen("UYVY"))==0 )
+					uvc_pix_fmt=UVC_FRAME_FORMAT_YUYV;
+				else if(strncmp(optarg,"MJPEG",strlen("MJPEG"))==0 )
+					uvc_pix_fmt=UVC_FRAME_FORMAT_MJPEG;
+				else if(strncmp(optarg,"GREY8",strlen("GREY8"))==0 )
+					uvc_pix_fmt=UVC_FRAME_FORMAT_GRAY8;
+				else if(strncmp(optarg,"RGB",strlen("RGB"))==0 )
+					uvc_pix_fmt=UVC_FRAME_FORMAT_RGB;
+				else if(strncmp(optarg,"BGR",strlen("BGR"))==0 )
+					uvc_pix_fmt=UVC_FRAME_FORMAT_BGR;
+			}
+			printf("uvc_pix_fmt=0x%x\n", uvc_pix_fmt);
+			break;
 
-    if (res < 0) {
-      uvc_perror(res, "uvc_open");
-    } else {
-      puts("Device opened");
+		case 'D':
+			if(optarg && strlen(optarg)){
+				int i=0;
+				printf("win dim:%s\n",optarg);
+				while(optarg[i] && optarg[i] !='x') i++;
+				if(optarg[i] =='x') {
+					optarg[i]=' ';//delimeter
+					sscanf(optarg,"%d %d", &frame_width, &frame_height);
+					printf("frame_width=%d, frame_height=%d\n", frame_width, frame_height);
+				}
+			}
+			break;
+		case 'p':
+			pid = strtol(optarg,NULL,16);
+			printf("%s:pid %s=0x%x\n",__func__, optarg, pid);
+			break;
 
-      uvc_print_diag(devh, stderr);
+		case 'v':
+			vid=strtol(optarg,NULL,16);
+			printf("%s:vid %s=0x%x\n",__func__, optarg, vid);
+			break;
 
-      res = uvc_get_stream_ctrl_format_size(
-          devh, &ctrl, UVC_FRAME_FORMAT_YUYV, 640, 480, 30/*fps*/
-      );
+#if 0
+		case 'c':
+			errno = 0;
+			frame_count = strtol(optarg, NULL, 0);
+			if (errno)
+				errno_exit(optarg);
+			break;
+		case 'E':
+			fixedInterval=1;
+			break;
 
-      uvc_print_stream_ctrl(&ctrl, stderr);
+		case 'k':
+			errno = 0;
+			repeat_count = strtol(optarg, NULL, 0);
+			if (errno)
+				errno_exit(optarg);
+			break;
+
+		case 'h':
+			usage(stdout, argc, argv);
+			r=-1;
+			break;
+
+		case 'I':
+			enableInfraRed=1;
+			//UVC, v4l2 default is YUYV422 for 8bit NIR GREY
+			//v4l2_pix_fmt=V4L2_PIX_FMT_Y10;//NIR 10bits grey scale
+			//v4l2_pix_fmt=V4L2_PIX_FMT_GREY;
+			printf("IR mode enabled!\n");
+			break;
+		case 'o':
+			errno = 0;
+			strncpy(ofile_bcv, optarg, 1024);
+			printf("%s\n", optarg);
+			if (errno)
+				errno_exit(optarg);
+			break;
+
+#endif
+
+		case 'V':
+			//setVerbose(1);
+			break;
+
+		default:
+			//usage(stderr, argc, argv);
+			r=-1;
+		}
+	}
+	return r;
+}
+
+int uvcClose(PUVC_INFO_T my_uvc)
+{
+	uvc_context_t *ctx = my_uvc->ctx;
+	uvc_device_handle_t *devh = my_uvc->devh;
+	uvc_device_t *dev=my_uvc->dev;
+	uvc_stream_ctrl_t ctrl=my_uvc->ctrl;
+
+	printf("%s:Device closed\n",__func__);
+	uvc_close(devh);
+
+	uvc_unref_device(dev);
+
+	uvc_exit(ctx);
+	printf("%s:UVC exited\n",__func__);
+}
+
+int uvcStartCapture(PUVC_INFO_T my_uvc, uvc_frame_callback_t *cb, void *usr_ptr)
+{
+	uvc_device_handle_t *devh = my_uvc->devh;
+	uvc_stream_ctrl_t ctrl=my_uvc->ctrl;
+	int frame_size = my_uvc->frame_size;
+
+	uvc_error_t res;
+	res = uvc_start_streaming(devh, &ctrl, cb, /*12345*/usr_ptr, 0);
+	//printf("%s:width=%d, height=%d\n",__func__,
+	//	   devh->streams->frame.width, devh->streams->frame.height);
+	if (res < 0) {
+		uvc_perror(res, "start_streaming");
+		return res;
+	}
+	res = uvcBufInit(my_uvc);//must behind uvc_start_streaming
+	return res;
+}
+
+void uvcStopCapture(PUVC_INFO_T my_uvc)
+{
+	uvc_stop_streaming(my_uvc->devh);
+	printf("%s:Done streaming.\n",__func__);
+
+}
+
+/**
+ * uvcOpen
+ * uvcStartCapture
+ * 
+ * vcStopCapture
+ * uvcClose
+ */
+int uvcOpen(UVC_INFO_T *my_uvc) 
+{
+	uvc_error_t res;
+	int pid = my_uvc-> pid;
+	int vid = my_uvc->vid;
+	char *sn = NULL;
+	if(strlen(my_uvc->sn))
+		sn = my_uvc->sn;
+
+	res = uvc_init(&my_uvc->ctx, NULL);
+	if (res < 0) {
+		uvc_perror(res, "uvc_init");
+		return res;
+	}
+
+	printf("%s:UVC initialized\n",__func__);
+
+	res = uvc_find_device(
+		my_uvc->ctx, &my_uvc->dev,
+		my_uvc->vid, my_uvc->pid, /*NULL*/sn);
+	if (res < 0) {
+		uvc_perror(res, "uvc_find_device");
+	} else {
+		printf("%s:Device found\n",__func__);
+		res = uvc_open(my_uvc->dev, &my_uvc->devh);
+
+		if (res < 0) {
+		uvc_perror(res, "uvc_open");
+		} else {
+		puts("Device opened");
+
+		uvc_print_diag(my_uvc->devh, stderr);
+
+		res = uvc_get_stream_ctrl_format_size(
+			my_uvc->devh, &my_uvc->ctrl, my_uvc->uvc_pix_fmt/*UVC_FRAME_FORMAT_YUYV*/, 
+			my_uvc->frame_width, my_uvc->frame_height, my_uvc->fps/*30*/
+		);
+
+		uvc_print_stream_ctrl(&my_uvc->ctrl, stderr);
+		printf("res=%d\n", res);
 
       if (res < 0) {
         uvc_perror(res, "get_mode");
       } else {
 
-	#ifdef USE_OPENCV
-	    cvNamedWindow("Test", CV_WINDOW_AUTOSIZE);
-		cvImg = cvCreateImageHeader(
-			cvSize(640 /*bgr->width*/, /*bgr->height*/ 480),
-			IPL_DEPTH_8U,
-			3);
-	#endif
-		clock_gettime(CLOCK_REALTIME, &ts0);
+		//clock_gettime(CLOCK_REALTIME, &ts0);
+		switch(my_uvc->uvc_pix_fmt){
+			case UVC_FRAME_FORMAT_YUYV:
+			case UVC_FRAME_FORMAT_UYVY:
+				my_uvc->frame_size = frame_width*frame_height*2;
+				break;
+			case UVC_FRAME_FORMAT_GRAY8:
+			default:
+				my_uvc->frame_size = frame_width*frame_height;
+				break;
+		}
+	  }
+		}
+	}
+	return res;
+}
 
-		  res = uvc_start_streaming(devh, &ctrl, cb, 12345, 0);
-		//printf("%s:width=%d, height=%d\n",__func__,
-		//	   devh->streams->frame.width, devh->streams->frame.height);
-		  
+/**
+ * 
+ */
+char ShowFrame(uint8_t *data, int stride)
+{
+	char ch=0;
+#ifdef USE_OPENCV
+  cvSetData(cvImg, data, stride);
+  cvShowImage("Test", cvImg);
+  ch = cvWaitKey(20);
+#endif	//USE_OPENCV
+  return ch;
+}
 
-        if (res < 0) {
-          uvc_perror(res, "start_streaming");
-        } else {
-          puts("Streaming for 10 seconds...");
-          uvc_error_t resAEMODE = uvc_set_ae_mode(devh, 1);
-          uvc_perror(resAEMODE, "set_ae_mode");
-          int i;
-          for (i = 1; i <= 10; i++) {
-            /* uvc_error_t resPT = uvc_set_pantilt_abs(devh, i * 20 * 3600, 0); */
-            /* uvc_perror(resPT, "set_pt_abs"); */
-            uvc_error_t resEXP = uvc_set_exposure_abs(devh, 20 + i * 5);
-            uvc_perror(resEXP, "set_exp_abs");
-            
-            sleep(1);
-          }
-          sleep(10);
-          uvc_stop_streaming(devh);
-	  puts("Done streaming.");
-        }
-      }
+/**
+ * 
+ */
+int frameProcess(PUVC_INFO_T my_uvc, UVC_BUFFER_T *uvcBuffer)
+{
+	int occupied=0, empty=0;
+	uint8_t *frame=NULL;
 
-      uvc_close(devh);
-      puts("Device closed");
+	printf(">>%s thread start...., quit=%d\n",__func__, quit);
+	while (!quit) {
+        frame=uvcBufDelete(&quit);//get one frame
+		printf("%s:frame=%p\n",__func__, frame);
+		//show it
+		char ch = ShowFrame(frame, uvcBuffer->frame_stride * uvcBuffer->frame_width);
+		if(ch == 'q' || ch == 'Q' ||ch ==27){
+			quit=1;
+			break;
+		}
     }
+exit:
+    printf("<<%s exit:quit=%d\n",__func__, quit);
+	quit = 0;
+}
 
-    uvc_unref_device(dev);
-  }
+int main(int argc, char **argv) 
+{
+	uvc_error_t res;
+	option(argc, argv);
+	
+	
+	///////////////////////////////////////////////////////
+	int priority=0;
+	int	policy=/*SCHED_OTHER*/ /*SCHED_RR*/ SCHED_FIFO;//real time
+	pthread_attr_t tattr;
+	struct sched_param param;
+	printf("%s:SCHED_FIFO=%d, SCHED_RR=%d, SCHED_OTHER=%d\n",__func__, SCHED_FIFO,
+		SCHED_RR, SCHED_OTHER);
+#if 0
+  	/* setting the new scheduling param */
+	ret = pthread_attr_init (&tattr);
+	ret = pthread_attr_getschedpolicy(&tattr, &policy);
+	priority = sched_get_priority_max(policy);
+	printf("%s:current policy=%d, priority=%d\n",__func__, policy, priority);
+	//setup the thread attr before create the thread
+	policy=SCHED_FIFO;//set realtime priority
+	ret= pthread_attr_setschedpolicy(&tattr, policy);
+	printf("%s:pthread_attr_setschedpolicy ret=%d, policy=%d\n",__func__, ret, policy);
+	/* safe to get existing scheduling param */
+	ret = pthread_attr_getschedparam (&tattr, &param);//tattr->param
+	/* set the priority; others are unchanged */
+	param.sched_priority = 1;	//1-99
+	/* setting the new scheduling param */
+	ret = pthread_attr_setschedparam (&tattr, &param);//param->tattr
+#endif
+	//////////////////////////////////////////////////////////////////
+  	int ret = pthread_getschedparam(pthread_self(), &policy, &param);
+	printf("%s:current ret=%d, policy=%d, param.sched_priority=%d\n",__func__, ret,
+		   policy, param.sched_priority);
+	policy = SCHED_FIFO;
+	param.sched_priority=1;//1-99, 99 is the less 
+	ret = pthread_setschedparam(pthread_self(), policy, &param);
+	printf(">>%s:ret=%d, policy=%d, param.sched_priority=%d\n",__func__, ret,policy, 
+		   param.sched_priority);
+	ret = pthread_getschedparam(pthread_self(), &policy, &param);
+	printf("<<<%s:current ret=%d, policy=%d, param.sched_priority=%d\n",__func__, ret,
+		   policy, param.sched_priority);
+	////////////////////////////////////
 
-  uvc_exit(ctx);
-  puts("UVC exited");
+	memset(&myUVC, 0 , sizeof(myUVC) );
+ 	myUVC.pid = pid;
+	myUVC.vid = vid;
+
+	strncpy(myUVC.sn,sn, 30);
+	
+	myUVC.fps= fps;
+	myUVC.uvc_pix_fmt=uvc_pix_fmt;
+	myUVC.v4l2_pix_fmt=v4l2_pix_fmt;
+	myUVC.frame_width = frame_width;
+	myUVC.frame_height = frame_height;
+
+#ifdef USE_OPENCV
+	cvNamedWindow("Test", CV_WINDOW_AUTOSIZE);
+	if(uvc_pix_fmt == UVC_FRAME_FORMAT_YUYV){
+		myUVC.frame_stride=3;	//RGB display
+		cvImg = cvCreateImageHeader(
+				cvSize(frame_width, frame_height),
+				IPL_DEPTH_8U,
+				3);
+	}else{
+		cvImg = cvCreateImageHeader(
+				cvSize(frame_width, frame_height),
+				IPL_DEPTH_8U,
+				1);
+		myUVC.frame_stride=1;//8 bit grey
+	}
+#endif
+	/////
+	res = uvcOpen(&myUVC);
+	if(res){
+		printf("%s:uvcOpen fails = %d\n",__func__, res);
+		goto exit;
+	}
+	///start_streaming and callback in cb()
+	res=uvcStartCapture(&myUVC, callback, (void *)12345);
+	if (res < 0) {
+		uvc_perror(res, "start_streaming");
+		goto exit;
+	} 
+
+	//uvc_error_t resAEMODE = uvc_set_ae_mode(devh, 1);
+	//uvc_perror(resAEMODE, "set_ae_mode");
+
+	/* uvc_error_t resPT = uvc_set_pantilt_abs(devh, i * 20 * 3600, 0); */
+	/* uvc_perror(resPT, "set_pt_abs"); */
+	//uvc_error_t resEXP = uvc_set_exposure_abs(devh, 20 + i * 5);
+	//uvc_perror(resEXP, "set_exp_abs");
+
+	frameProcess(&myUVC, &bcvUVCBuffer);//process the uvc frame
+	
+	uvcStopCapture(&myUVC);//stop
+
+exit:
+	uvcClose(&myUVC);
 
 #ifdef USE_OPENCV
     cvReleaseImageHeader(&cvImg);
@@ -252,4 +491,3 @@ int main(int argc, char **argv) {
 
 	return 0;
 }
-

@@ -35,6 +35,14 @@
  * @defgroup streaming Streaming control functions
  * @brief Tools for creating, managing and consuming video streams
  */
+#define _GNU_SOURCE
+#define _MULTI_THREADED
+
+#include <stdio.h>
+#include <string.h>
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
 
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
@@ -793,6 +801,29 @@ fail:
   return ret;
 }
 
+/** @brief :  core_id = 0, 1, ... n-1, where n is the system's number of cores
+ * @url : http://stackoverflow.com/questions/1407786/how-to-set-cpu-affinity-of-a-particular-pthread
+ * !!! Thomas Tsai added
+ */
+int stick_this_thread_to_core(int core_id, pthread_t tid)
+{
+	int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
+	printf(">>%s:num_cores=%d, core_id=%d\n",__func__, num_cores, core_id);
+	if (core_id < 0 || core_id >= num_cores)
+		core_id = num_cores-1;//bind to the last core
+
+	cpu_set_t cpuset;
+	CPU_ZERO(&cpuset);
+	CPU_SET(core_id, &cpuset);
+
+	pthread_t current_thread = pthread_self();
+	if(tid != 0)
+		current_thread= tid;
+	int ret = pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
+	printf("<<%s:ret=%d\n",__func__, ret);
+   return ret;
+}
+
 /** Begin streaming video from the stream into the callback function.
  * @ingroup streaming
  *
@@ -957,9 +988,74 @@ uvc_error_t uvc_stream_start(
   /* If the user wants it, set up a thread that calls the user's function
    * with the contents of each frame.
    */
+
+/** How to increase thread priority in pthreads?
+@url : http://stackoverflow.com/questions/3649281/how-to-increase-thread-priority-in-pthreads
+chrt : ftp://ftp.kernel.org/pub/linux/utils/util-linux/v2.29/
+
+thomas@acer-s3:~/Downloads/util-linux-2.29-rc2$ ./chrt -m
+SCHED_OTHER min/max priority	: 0/0
+SCHED_FIFO min/max priority	: 1/99 ==> realtime
+SCHED_RR min/max priority	: 1/99 ==> realtime
+SCHED_BATCH min/max priority	: 0/0
+SCHED_IDLE min/max priority	: 0/0
+SCHED_DEADLINE min/max priority	: 0/0
+*/
+	int priority=0;
+	int	policy=/*SCHED_OTHER*/ /*SCHED_RR*/ SCHED_FIFO;//real time
+	pthread_attr_t tattr;
+	struct sched_param param;
+	printf("%s:SCHED_FIFO=%d, SCHED_RR=%d, SCHED_OTHER=%d\n",__func__, SCHED_FIFO,
+		SCHED_RR, SCHED_OTHER);
+
   if (cb) {
-    pthread_create(&strmh->cb_thread, NULL, _uvc_user_caller, (void*) strmh);
+	/* setting the new scheduling param */
+	ret = pthread_attr_init (&tattr);
+	ret = pthread_attr_getschedpolicy(&tattr, &policy);
+	priority = sched_get_priority_max(policy);
+	printf("%s:current policy=%d, priority=%d\n",__func__, policy, priority);
+	//setup the thread attr before create the thread
+	policy=SCHED_FIFO;//set realtime priority
+	ret= pthread_attr_setschedpolicy(&tattr, policy);
+	printf("%s:pthread_attr_setschedpolicy ret=%d, policy=%d\n",__func__, ret, policy);
+	/* safe to get existing scheduling param */
+	ret = pthread_attr_getschedparam (&tattr, &param);//tattr->param
+	/* set the priority; others are unchanged */
+	param.sched_priority = 1;	//1-99
+	/* setting the new scheduling param */
+	ret = pthread_attr_setschedparam (&tattr, &param);//param->tattr
+	//////////////////////////////////////////////////////////////////
+    ret = pthread_create(&strmh->cb_thread, &tattr, _uvc_user_caller, (void*) strmh);
+	printf("%s:pthread_create ret=%d\n",__func__, ret);
+	ret = pthread_getschedparam(strmh->cb_thread, &policy, &param);
+	printf(">>%s:ret=%d, policy=%d, param.sched_priority=%d\n",__func__, ret,policy, 
+		   param.sched_priority);
+	/////////////////////////////////////////////////////
+	//bind the specific core of cpu to the callback thread to prevent
+	//the cpu core switch overhead, because this is a critical
+	//thread.
+	stick_this_thread_to_core(1, strmh->cb_thread);
   }
+
+#if 0
+	struct sched_param    param;
+	int	policy = SCHED_FIFO;//real time
+	int theChangedPriority=0;
+	memset(&param, 0, sizeof(param));
+	param.sched_priority = 0;//PTHREAD_PRIO_MIN_NP;
+
+	//printf("%s:PTHREAD_PRIO_MIN_NP=%d, PTHREAD_PRIO_MAX_NP=%d\n",__func__, PTHREAD_PRIO_MIN_NP,
+	//	PTHREAD_PRIO_MAX_NP);
+	/*
+	policy = SCHED_RR;
+	rc = pthread_setschedparam(strmh->cb_thread, policy, &param);
+	printf(">>%s:rc=%d\n",__func__, rc);
+	rc = pthread_getschedparam(strmh->cb_thread, &policy, &param);
+	printf("<<%s:rc=%d\n",__func__, rc);
+	printf("<<%s:policy=%d, param.sched_priority=%d\n",__func__, policy, param.sched_priority);
+	*/
+#endif
+	////////////////////////////////////////////////////
 
   for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS;
       transfer_id++) {

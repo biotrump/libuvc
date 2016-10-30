@@ -25,6 +25,8 @@ if (NOT CMAKE_BUILD_TARGET)
   set(CMAKE_BUILD_TARGET "Shared" CACHE STRING "" FORCE)
 endif()
 
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0 -fPIC")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 -g -O0 -fPIC -D_POSIX_C_SOURCE=200112L")
 #--------------------------------------------------
 #QT5
 # Widgets finds its own dependencies (QtGui and QtCore).
@@ -75,16 +77,12 @@ endif()
 
 
 #searching openMP in toolchain path, instead of host path!
-if(0)
 find_package(OpenMP)
 if(OPENMP_FOUND)
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 	add_definitions(-DENABLE_OPENMP)
 endif()
-endif()
-
-message("uvc=${uvc}")
 
 #--------------------
 if (0)
@@ -109,8 +107,7 @@ target_link_libraries(example
 	${JPEG_LIBRARIES}
 	uvc
 	${OpenCV_LIBS}
-#	${uvc}
-)
+	)
 endif()
 
 #
@@ -118,18 +115,17 @@ endif()
 #target_link_libraries(test uvc ${LIBUSB_LIBRARIES} opencv_highgui
 #  opencv_core)
 #
-if(1)
+
 add_executable(test
 	test.c
-)
+	uvc_thd.c
+	)
 qt5_use_modules(test Widgets  OpenGL Test Concurrent)
 #message("LIBUSB_LIBRARIES=${LIBUSB_LIBRARIES}")
 #message("JPEG_LIBRARIES=${JPEG_LIBRARIES}")
 target_link_libraries(test
+	uvc_static
 	${LIBUSB_LIBRARIES}
 	${JPEG_LIBRARIES}
-	uvc
 	${OpenCV_LIBS}
-#	opencv_highgui
 )
-endif()
