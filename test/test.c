@@ -48,7 +48,8 @@
 
 #ifdef USE_OPENCV
 #include <opencv/highgui.h>
-IplImage* cvImg;
+#include <opencv/cv.h>
+IplImage* mainCVImg;
 #endif
 
 #include "libuvc/libuvc.h"
@@ -69,7 +70,7 @@ int frame_height=480;
 int frame_size;
 int uvc_pix_fmt=UVC_FRAME_FORMAT_YUYV;//UVC_FRAME_FORMAT_GRAY8, UVC_FRAME_FORMAT_RGB,UVC_FRAME_FORMAT_UYVY
 int v4l2_pix_fmt=V4L2_PIX_FMT_YUYV;//V4L2_PIX_FMT_GREY, 
-int quit=0;
+int *quit=NULL;
 char sn[255];
 UVC_INFO_T myUVC;
 
@@ -237,159 +238,81 @@ static int option(int argc, char **argv)
 	return r;
 }
 
-int uvcClose(PUVC_INFO_T my_uvc)
-{
-	uvc_context_t *ctx = my_uvc->ctx;
-	uvc_device_handle_t *devh = my_uvc->devh;
-	uvc_device_t *dev=my_uvc->dev;
-	uvc_stream_ctrl_t ctrl=my_uvc->ctrl;
-
-	printf("%s:Device closed\n",__func__);
-	uvc_close(devh);
-
-	uvc_unref_device(dev);
-
-	uvc_exit(ctx);
-	printf("%s:UVC exited\n",__func__);
-}
-
-int uvcStartCapture(PUVC_INFO_T my_uvc, uvc_frame_callback_t *cb, void *usr_ptr)
-{
-	uvc_device_handle_t *devh = my_uvc->devh;
-	uvc_stream_ctrl_t ctrl=my_uvc->ctrl;
-	int frame_size = my_uvc->frame_size;
-
-	uvc_error_t res;
-	res = uvc_start_streaming(devh, &ctrl, cb, /*12345*/usr_ptr, 0);
-	//printf("%s:width=%d, height=%d\n",__func__,
-	//	   devh->streams->frame.width, devh->streams->frame.height);
-	if (res < 0) {
-		uvc_perror(res, "start_streaming");
-		return res;
-	}
-	res = uvcBufInit(my_uvc);//must behind uvc_start_streaming
-	return res;
-}
-
-void uvcStopCapture(PUVC_INFO_T my_uvc)
-{
-	uvc_stop_streaming(my_uvc->devh);
-	printf("%s:Done streaming.\n",__func__);
-
-}
-
-/**
- * uvcOpen
- * uvcStartCapture
- * 
- * vcStopCapture
- * uvcClose
+/** @brief : a hook to openCV or any display system
+ * to show the process data.
+ * @param[IN] cvimg: if null, mainCVImg, else convert to (IplImage *)
+ * @param[IN] data : the frame data to show, like RGB  24bit pixel
+ * @param[IN] stride : bytes per row.RGB is width *3 for 24bits
  */
-int uvcOpen(UVC_INFO_T *my_uvc) 
-{
-	uvc_error_t res;
-	int pid = my_uvc-> pid;
-	int vid = my_uvc->vid;
-	char *sn = NULL;
-	if(strlen(my_uvc->sn))
-		sn = my_uvc->sn;
-
-	res = uvc_init(&my_uvc->ctx, NULL);
-	if (res < 0) {
-		uvc_perror(res, "uvc_init");
-		return res;
-	}
-
-	printf("%s:UVC initialized\n",__func__);
-
-	res = uvc_find_device(
-		my_uvc->ctx, &my_uvc->dev,
-		my_uvc->vid, my_uvc->pid, /*NULL*/sn);
-	if (res < 0) {
-		uvc_perror(res, "uvc_find_device");
-	} else {
-		printf("%s:Device found\n",__func__);
-		res = uvc_open(my_uvc->dev, &my_uvc->devh);
-
-		if (res < 0) {
-		uvc_perror(res, "uvc_open");
-		} else {
-		puts("Device opened");
-
-		uvc_print_diag(my_uvc->devh, stderr);
-
-		res = uvc_get_stream_ctrl_format_size(
-			my_uvc->devh, &my_uvc->ctrl, my_uvc->uvc_pix_fmt/*UVC_FRAME_FORMAT_YUYV*/, 
-			my_uvc->frame_width, my_uvc->frame_height, my_uvc->fps/*30*/
-		);
-
-		uvc_print_stream_ctrl(&my_uvc->ctrl, stderr);
-		printf("res=%d\n", res);
-
-      if (res < 0) {
-        uvc_perror(res, "get_mode");
-      } else {
-
-		//clock_gettime(CLOCK_REALTIME, &ts0);
-		switch(my_uvc->uvc_pix_fmt){
-			case UVC_FRAME_FORMAT_YUYV:
-			case UVC_FRAME_FORMAT_UYVY:
-				my_uvc->frame_size = frame_width*frame_height*2;
-				break;
-			case UVC_FRAME_FORMAT_GRAY8:
-			default:
-				my_uvc->frame_size = frame_width*frame_height;
-				break;
-		}
-	  }
-		}
-	}
-	return res;
-}
-
-/**
- * 
- */
-char ShowFrame(uint8_t *data, int stride)
+char hookShowFrame(void *cvimg, uint8_t *data, int stride)
 {
 	char ch=0;
+
 #ifdef USE_OPENCV
-  cvSetData(cvImg, data, stride);
-  cvShowImage("Test", cvImg);
-  ch = cvWaitKey(20);
+	IplImage* img= cvimg?(IplImage*)cvimg: mainCVImg;
+
+	cvSetData(img, data, stride);
+	cvShowImage("Test", img);
+	ch = cvWaitKey(10);
 #endif	//USE_OPENCV
   return ch;
 }
 
-/**
+/** @brief A necessary hook to process the uvc frame buffer
  * 
  */
-int frameProcess(PUVC_INFO_T my_uvc, UVC_BUFFER_T *uvcBuffer)
+int hookFrameProcess(PUVC_INFO_T my_uvc, UVC_BUFFER_T *uvcBuffer)
 {
 	int occupied=0, empty=0;
 	uint8_t *frame=NULL;
-
-	printf(">>%s thread start...., quit=%d\n",__func__, quit);
-	while (!quit) {
-        frame=uvcBufDelete(&quit);//get one frame
+	uint8_t *rgb=malloc(uvcBuffer->frame_width * uvcBuffer->frame_height * 
+		  uvcBuffer->frame_stride);
+	IplImage *yuyvImg = cvCreateImageHeader(
+				cvSize(frame_width, frame_height),
+				IPL_DEPTH_8U,2);
+	IplImage *rgbImg = cvCreateImageHeader(
+				cvSize(frame_width, frame_height),
+				IPL_DEPTH_8U,3);
+	cvSetData(rgbImg, rgb, uvcBuffer->frame_width*3);
+	printf(">>%s thread start...., quit=%d\n",__func__, *quit);
+	while (! *quit) {
+#if 0
+		sleep(1);
+#else
+		/////////////////////////////////////////////////////////
+        // get a frame from the uvc frame buffer
+        //frame=uvcBufDelete(quit);//get one frame
+		//frame=uvcBufDelete_nonblocking(quit);//get one frame
+		frame=UVCBUFRead(quit);
 		printf("%s:frame=%p\n",__func__, frame);
+		///////////////////////////////////////////////////////////
+		
 		//show it
-		char ch = ShowFrame(frame, uvcBuffer->frame_stride * uvcBuffer->frame_width);
+		cvSetData(yuyvImg, frame, uvcBuffer->frame_width*2);
+		cvCvtColor( yuyvImg, rgbImg, CV_YUV2BGR_YUYV);
+		char ch = hookShowFrame(mainCVImg, rgb, uvcBuffer->frame_stride * uvcBuffer->frame_width);
 		if(ch == 'q' || ch == 'Q' ||ch ==27){
-			quit=1;
+			*quit=1;
 			break;
 		}
+		//bcvframe engine
+#endif
     }
 exit:
-    printf("<<%s exit:quit=%d\n",__func__, quit);
-	quit = 0;
+	if(rgb)
+		free(rgb);
+	rgb=NULL;
+
+	cvReleaseImageHeader(&yuyvImg);
+	cvReleaseImageHeader(&rgbImg);
+	printf("<<%s exit:quit=%d\n",__func__, *quit);
+	*quit = 0;
 }
 
 int main(int argc, char **argv) 
 {
 	uvc_error_t res;
 	option(argc, argv);
-	
 	
 	///////////////////////////////////////////////////////
 	int priority=0;
@@ -428,7 +351,7 @@ int main(int argc, char **argv)
 	printf("<<<%s:current ret=%d, policy=%d, param.sched_priority=%d\n",__func__, ret,
 		   policy, param.sched_priority);
 	////////////////////////////////////
-
+	quit = &forceQuit;	//!!!MUST
 	memset(&myUVC, 0 , sizeof(myUVC) );
  	myUVC.pid = pid;
 	myUVC.vid = vid;
@@ -445,48 +368,29 @@ int main(int argc, char **argv)
 	cvNamedWindow("Test", CV_WINDOW_AUTOSIZE);
 	if(uvc_pix_fmt == UVC_FRAME_FORMAT_YUYV){
 		myUVC.frame_stride=3;	//RGB display
-		cvImg = cvCreateImageHeader(
+		mainCVImg = cvCreateImageHeader(
 				cvSize(frame_width, frame_height),
 				IPL_DEPTH_8U,
 				3);
 	}else{
-		cvImg = cvCreateImageHeader(
+		mainCVImg = cvCreateImageHeader(
 				cvSize(frame_width, frame_height),
 				IPL_DEPTH_8U,
 				1);
 		myUVC.frame_stride=1;//8 bit grey
 	}
 #endif
-	/////
-	res = uvcOpen(&myUVC);
+
+	/** 
+	 * main routine
+	 */
+	res = uvcProcess(&myUVC);
 	if(res){
-		printf("%s:uvcOpen fails = %d\n",__func__, res);
-		goto exit;
+		printf("%s:uvcProcess fails = %d\n",__func__, res);
 	}
-	///start_streaming and callback in cb()
-	res=uvcStartCapture(&myUVC, callback, (void *)12345);
-	if (res < 0) {
-		uvc_perror(res, "start_streaming");
-		goto exit;
-	} 
-
-	//uvc_error_t resAEMODE = uvc_set_ae_mode(devh, 1);
-	//uvc_perror(resAEMODE, "set_ae_mode");
-
-	/* uvc_error_t resPT = uvc_set_pantilt_abs(devh, i * 20 * 3600, 0); */
-	/* uvc_perror(resPT, "set_pt_abs"); */
-	//uvc_error_t resEXP = uvc_set_exposure_abs(devh, 20 + i * 5);
-	//uvc_perror(resEXP, "set_exp_abs");
-
-	frameProcess(&myUVC, &bcvUVCBuffer);//process the uvc frame
-	
-	uvcStopCapture(&myUVC);//stop
-
-exit:
-	uvcClose(&myUVC);
 
 #ifdef USE_OPENCV
-    cvReleaseImageHeader(&cvImg);
+    cvReleaseImageHeader(&mainCVImg);
 #endif
 
 	return 0;

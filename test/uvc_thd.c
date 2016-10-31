@@ -21,6 +21,8 @@
 
 UVC_BUFFER_T bcvUVCBuffer;
 
+int forceQuit=0;
+
 /** @brief
  * ret=-1, errno=110, ETIMEDOUT==110
  */
@@ -142,8 +144,8 @@ cb usr_ptr is from 12345 of uvc_start_streaming
  * 
  */
 
-void callback(uvc_frame_t *frame, void *usr_ptr) {
-  uvc_frame_t *bgr;
+void callback(uvc_frame_t *frame, void *usr_ptr) 
+{
   uvc_error_t ret;
 
 //  	printf(">>%s:sequence=%d, tv_sec=%d, tv_nsec=%lu\n",__func__, 
@@ -174,10 +176,17 @@ void callback(uvc_frame_t *frame, void *usr_ptr) {
 		   delt.tv_sec , delt.tv_nsec, 1.0E9/delt.tv_nsec);
 
 #endif
-  //printf("callback! length = %u, ptr = %d\n", frame->data_bytes, (int) ptr);
-	uvcBufInsert(frame->data);
+	//printf("callback! length = %u, ptr = %d\n", frame->data_bytes, (int) ptr);
 
-  bgr = uvc_allocate_frame(frame->width * frame->height * 3);
+#ifdef UVC_CAPTURE_NON_BLOCK
+	uvcBufInsert_nonblocking(frame->data, &forceQuit);
+#else
+	uvcBufInsert(frame->data, &forceQuit);
+#endif
+
+#if CALLBACK_DEBUG_SHOW
+//#if 1
+  uvc_frame_t *bgr = uvc_allocate_frame(frame->width * frame->height * 3);
   if (!bgr) {
     printf("unable to allocate bgr frame!");
     return;
@@ -190,9 +199,10 @@ void callback(uvc_frame_t *frame, void *usr_ptr) {
     return;
   }
 
-  ShowFrame(bgr->data, bgr->width * 3);
+  hookShowFrame(NULL, bgr->data, bgr->width * 3);
   
   uvc_free_frame(bgr);
+#endif
 }
 
 int uvcBufInit(PUVC_INFO_T my_uvc)
@@ -230,7 +240,7 @@ int uvcBufInit(PUVC_INFO_T my_uvc)
 	return 0;
 }
 
-uint8_t *uvcBufInsert(uint8_t *in /*, int size*/)
+uint8_t *uvcBufInsert(uint8_t *in, int *quit)
 {
 	int at;
 	int empty=0, occupied=0;
@@ -243,17 +253,43 @@ uint8_t *uvcBufInsert(uint8_t *in /*, int size*/)
 	sem_getvalue(&bcvUVCBuffer.occupied, &occupied);
 
 	printf(">>%s:empty=%d, occupied=%d\n",__func__,empty,occupied);
-	sem_wait(&bcvUVCBuffer.empty);//Semaphore P op, --bcvUVCBuffer->empty
+	//sem_wait(&bcvUVCBuffer.empty);//Semaphore P op, --bcvUVCBuffer->empty
+	while( sem_timedwait_secs(&bcvUVCBuffer.empty, 2) ){
+		if(errno == ETIMEDOUT)
+			if(quit){
+				if(*quit){
+					printf(">>%s:sem quit:%d\n",__func__, *quit);
+					goto exit;
+				}
+			}
+	}
 
 	sem_getvalue(&bcvUVCBuffer.empty, &empty);
 	sem_getvalue(&bcvUVCBuffer.occupied, &occupied);
 	printf(">>>%s:empty=%d, occupied=%d\n",__func__,empty,occupied);
 
 	/* If another thread uses the buffer, wait */
-	pthread_mutex_lock(&bcvUVCBuffer.mutex);
+	//pthread_mutex_lock(&bcvUVCBuffer.mutex);
+	while( pthread_mutex_timedlock_secs(&bcvUVCBuffer.mutex, 2) ){
+		if(errno == ETIMEDOUT)
+			if(quit){
+				if(*quit){
+					printf(">>%s:mutex quit:%d\n",__func__, *quit);
+					goto exit;
+				}
+			}
+	}
+
 	at = bcvUVCBuffer.tail%bcvUVCBuffer.max_frames;
 	printf("%s:at=%d\n",__func__, at);
 	bcvUVCBuffer.tail = (bcvUVCBuffer.tail+1)%bcvUVCBuffer.max_frames;
+
+	//copy input uvc frame to uvc buffer before mutex unlock,
+	//so consumer won't read the uvc buffer while it's copying...
+	//otherwise display tearing happens
+	memcpy(bcvUVCBuffer.data + at*bcvUVCBuffer.frame_size , in,  
+		   bcvUVCBuffer.frame_size);
+
 	pthread_mutex_unlock(&bcvUVCBuffer.mutex);
 	sem_post(&bcvUVCBuffer.occupied);
 	//printf("%s:5\n",__func__);
@@ -262,9 +298,69 @@ uint8_t *uvcBufInsert(uint8_t *in /*, int size*/)
 	sem_getvalue(&bcvUVCBuffer.occupied, &occupied);
 	printf("<<<%s:empty=%d, occupied=%d\n",__func__,empty,occupied);
 
-	memcpy(bcvUVCBuffer.data + at*bcvUVCBuffer.frame_size , in,  
-		   bcvUVCBuffer.frame_size);
 	return bcvUVCBuffer.data + at*bcvUVCBuffer.frame_size;
+exit:
+	return NULL;
+}
+
+/**
+ * non-blocking insert,
+ * if a circulr queue is full, the oldest will be overwritten.
+ * The head will also move to the next, too.
+ * 
+ */
+uint8_t *uvcBufInsert_nonblocking(uint8_t *in, int *quit)
+{
+	int at;
+	int empty=0, occupied=0;
+
+	if(bcvUVCBuffer.magic != 0x55aa){
+		printf("!!!wrong bcvUVCBuffer.magic=0x%x \n", bcvUVCBuffer.magic);
+		return NULL;
+	}
+
+	/* If another thread uses the buffer, wait */
+	//pthread_mutex_lock(&bcvUVCBuffer.mutex);
+	while( pthread_mutex_timedlock_secs(&bcvUVCBuffer.mutex, 2) ){
+		if(errno == ETIMEDOUT)
+			if(quit){
+				if(*quit){
+					printf(">>%s:mutex quit:%d\n",__func__, *quit);
+					goto exit;
+				}
+			}
+	}
+
+	if(bcvUVCBuffer.cur_frames == bcvUVCBuffer.max_frames){//full queue, overwritten
+		bcvUVCBuffer.head = (bcvUVCBuffer.head+1)%bcvUVCBuffer.max_frames;
+		printf(">>%s:full\n",__func__);
+		//notify queue is full and overwritten
+
+	}else{
+		bcvUVCBuffer.cur_frames ++;
+		sem_post(&bcvUVCBuffer.occupied);//V let delete go 
+	}
+	sem_getvalue(&bcvUVCBuffer.occupied, &occupied);
+	printf("%s:occupied=%d\n",__func__, occupied);
+
+	printf("%s:cur_frames=%d, max_frames=%d, head=%d, tail=%d\n ",__func__, 
+			   bcvUVCBuffer.cur_frames, bcvUVCBuffer.max_frames, 
+		 bcvUVCBuffer.head, bcvUVCBuffer.tail);
+
+	at = bcvUVCBuffer.tail%bcvUVCBuffer.max_frames;
+	printf("<<%s:at=%d\n",__func__, at);
+	bcvUVCBuffer.tail = (bcvUVCBuffer.tail+1)%bcvUVCBuffer.max_frames;
+
+	//copy input uvc frame to uvc buffer before mutex unlock,
+	//so consumer won't read the uvc buffer while it's copying...
+	//otherwise display tearing happens
+	memcpy(bcvUVCBuffer.data + at*bcvUVCBuffer.frame_size , in,
+		   bcvUVCBuffer.frame_size);
+	pthread_mutex_unlock(&bcvUVCBuffer.mutex);
+
+	return bcvUVCBuffer.data + at*bcvUVCBuffer.frame_size;
+exit:
+	return NULL;
 }
 
 /**
@@ -317,10 +413,58 @@ uint8_t *uvcBufDelete(int *quit)
 	pthread_mutex_unlock(&bcvUVCBuffer.mutex);
 	sem_post(&bcvUVCBuffer.empty);
 
-exit:
 	printf("%s:at=%d,0x%x \n",__func__, at, at*bcvUVCBuffer.frame_size);
 	return bcvUVCBuffer.data + at*bcvUVCBuffer.frame_size;	
+exit:
+	return NULL;
 }
+
+uint8_t *uvcBufDelete_nonblocking(int *quit)
+{
+	if(bcvUVCBuffer.magic != 0x55aa){
+		printf("!!!wrong bcvUVCBuffer.magic=0x%x \n", bcvUVCBuffer.magic);
+		return NULL;
+	}
+	int occupied;
+	int at;
+
+	//sem_wait(&bcvUVCBuffer.occupied);//Semaphore P op, --bcvUVCBuffer->empty
+	while( sem_timedwait_secs(&bcvUVCBuffer.occupied, 2) ){
+		if(errno == ETIMEDOUT)
+			if(quit){
+				if(*quit){
+					printf(">>%s:sem quit:%d\n",__func__, *quit);
+					goto exit;
+				}
+			}
+	}
+
+	/* If another thread uses the buffer, wait */
+	//pthread_mutex_lock(&bcvUVCBuffer.mutex);
+	while( pthread_mutex_timedlock_secs(&bcvUVCBuffer.mutex, 2) ){
+		if(errno == ETIMEDOUT)
+			if(quit){
+				if(*quit){
+					printf(">>%s:mutex quit:%d\n",__func__, *quit);
+					goto exit;
+				}
+			}
+	}
+	at = bcvUVCBuffer.head%bcvUVCBuffer.max_frames;
+	bcvUVCBuffer.head = (bcvUVCBuffer.head+1)%bcvUVCBuffer.max_frames;
+
+	bcvUVCBuffer.cur_frames--;
+	printf(">>%s:cur_frames=%d, max_frames=%d, head=%d, tail=%d\n ",__func__, 
+			   bcvUVCBuffer.cur_frames, bcvUVCBuffer.max_frames, 
+		 bcvUVCBuffer.head, bcvUVCBuffer.tail);
+	pthread_mutex_unlock(&bcvUVCBuffer.mutex);
+
+	printf("<<%s:at=%d,0x%x \n",__func__, at, at*bcvUVCBuffer.frame_size);
+	return bcvUVCBuffer.data + at*bcvUVCBuffer.frame_size;	
+exit:
+	return NULL;
+}
+
 
 /**
  * if head == 1, get uvc buffer head address
@@ -369,4 +513,149 @@ int uvcBufDeInit(void)
 	sem_destroy(&bcvUVCBuffer.occupied);
 	sem_destroy(&bcvUVCBuffer.empty);
 	return 0;
+}
+
+int uvcClose(PUVC_INFO_T my_uvc)
+{
+	uvc_context_t *ctx = my_uvc->ctx;
+	uvc_device_handle_t *devh = my_uvc->devh;
+	uvc_device_t *dev=my_uvc->dev;
+	uvc_stream_ctrl_t ctrl=my_uvc->ctrl;
+
+	printf("%s:Device closed\n",__func__);
+	uvc_close(devh);
+
+	uvc_unref_device(dev);
+
+	uvc_exit(ctx);
+	printf("%s:UVC exited\n",__func__);
+}
+
+int uvcStartCapture(PUVC_INFO_T my_uvc, uvc_frame_callback_t *cb, void *usr_ptr)
+{
+	uvc_device_handle_t *devh = my_uvc->devh;
+	uvc_stream_ctrl_t ctrl=my_uvc->ctrl;
+	int frame_size = my_uvc->frame_size;
+
+	uvc_error_t res;
+	res = uvc_start_streaming(devh, &ctrl, cb, /*12345*/usr_ptr, 0);
+	//printf("%s:width=%d, height=%d\n",__func__,
+	//	   devh->streams->frame.width, devh->streams->frame.height);
+	if (res < 0) {
+		uvc_perror(res, "start_streaming");
+		return res;
+	}
+	res = uvcBufInit(my_uvc);//must behind uvc_start_streaming
+	return res;
+}
+
+void uvcStopCapture(PUVC_INFO_T my_uvc)
+{
+	uvc_stop_streaming(my_uvc->devh);
+	printf("%s:Done streaming.\n",__func__);
+
+}
+
+/**
+ * uvcOpen
+ * uvcStartCapture
+ * 
+ * vcStopCapture
+ * uvcClose
+ */
+int uvcOpen(UVC_INFO_T *my_uvc) 
+{
+	uvc_error_t res;
+	int pid = my_uvc-> pid;
+	int vid = my_uvc->vid;
+	char *sn = NULL;
+	if(strlen(my_uvc->sn))
+		sn = my_uvc->sn;
+
+	res = uvc_init(&my_uvc->ctx, NULL);
+	if (res < 0) {
+		uvc_perror(res, "uvc_init");
+		return res;
+	}
+
+	printf("%s:UVC initialized\n",__func__);
+
+	res = uvc_find_device(
+		my_uvc->ctx, &my_uvc->dev,
+		my_uvc->vid, my_uvc->pid, /*NULL*/sn);
+	if (res < 0) {
+		uvc_perror(res, "uvc_find_device");
+	} else {
+		printf("%s:Device found\n",__func__);
+		res = uvc_open(my_uvc->dev, &my_uvc->devh);
+
+		if (res < 0) {
+		uvc_perror(res, "uvc_open");
+		} else {
+		puts("Device opened");
+
+		uvc_print_diag(my_uvc->devh, stderr);
+
+		res = uvc_get_stream_ctrl_format_size(
+			my_uvc->devh, &my_uvc->ctrl, my_uvc->uvc_pix_fmt/*UVC_FRAME_FORMAT_YUYV*/, 
+			my_uvc->frame_width, my_uvc->frame_height, my_uvc->fps/*30*/
+		);
+
+		uvc_print_stream_ctrl(&my_uvc->ctrl, stderr);
+		printf("res=%d\n", res);
+
+      if (res < 0) {
+        uvc_perror(res, "get_mode");
+      } else {
+
+		//clock_gettime(CLOCK_REALTIME, &ts0);
+		switch(my_uvc->uvc_pix_fmt){
+			case UVC_FRAME_FORMAT_YUYV:
+			case UVC_FRAME_FORMAT_UYVY:
+				my_uvc->frame_size = my_uvc->frame_width*my_uvc->frame_height*2;
+				break;
+			case UVC_FRAME_FORMAT_GRAY8:
+			default:
+				my_uvc->frame_size = my_uvc->frame_width*my_uvc->frame_height;
+				break;
+		}
+	  }
+		}
+	}
+	return res;
+}
+
+/** @brief  uvc process until terminates 
+ * 
+ */
+int uvcProcess(UVC_INFO_T* myuvc)
+{
+	/////
+	int res = uvcOpen(myuvc);
+	if(res){
+		printf("%s:uvcOpen fails = %d\n",__func__, res);
+		goto exit;
+	}
+	///start_streaming and callback in cb()
+	res=uvcStartCapture(myuvc, callback, (void *)12345);
+	if (res < 0) {
+		uvc_perror(res, "start_streaming");
+		goto exit;
+	} 
+
+	//uvc_error_t resAEMODE = uvc_set_ae_mode(devh, 1);
+	//uvc_perror(resAEMODE, "set_ae_mode");
+
+	/* uvc_error_t resPT = uvc_set_pantilt_abs(devh, i * 20 * 3600, 0); */
+	/* uvc_perror(resPT, "set_pt_abs"); */
+	//uvc_error_t resEXP = uvc_set_exposure_abs(devh, 20 + i * 5);
+	//uvc_perror(resEXP, "set_exp_abs");
+
+	hookFrameProcess(myuvc, &bcvUVCBuffer);//HOOK to process the uvc frame
+
+	uvcStopCapture(myuvc);//stop
+	res=0;
+exit:
+	uvcClose(myuvc);
+	return res;
 }
